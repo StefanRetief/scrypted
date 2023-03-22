@@ -1,4 +1,4 @@
-import { Camera, FFmpegInput, MediaObject, PictureOptions, ResponseMediaStreamOptions, VideoCamera, ScryptedMimeTypes, RequestMediaStreamOptions, Setting } from '@scrypted/sdk';
+import { Camera, FFmpegInput, MediaObject, PictureOptions, ResponseMediaStreamOptions, VideoCamera, ScryptedMimeTypes, RequestMediaStreamOptions, Setting, SettingValue } from '@scrypted/sdk';
 import sdk from '@scrypted/sdk';
 
 import { DeviceRegistration, DeviceStatus } from './base-station-api-client';
@@ -19,6 +19,7 @@ export class ArloCameraDevice extends ArloDeviceBase implements Camera, VideoCam
     // override
     onRegistrationUpdated(deviceRegistration: DeviceRegistration) {
         super.onRegistrationUpdated(deviceRegistration);
+        this.provider.baseStationApiClient.postQuality(this.nativeId, this.videoQuality());
         this.isSnapshotEligible = true;
     }
 
@@ -197,11 +198,32 @@ export class ArloCameraDevice extends ArloDeviceBase implements Camera, VideoCam
                 description: 'Enable this setting if you want to allow prebuffering when the camera is charging the battery.',
                 type: 'boolean',
                 value: (this.allowBatteryPrebuffer()).toString(),
-            }
+            },
+            {
+                key: 'videoQuality',
+                title: 'Video Quality',
+                description: 'Low through Insane. No promises that Insane will work.',
+                type: 'string',
+                choices: ['Low', 'Medium', 'High', 'Subscription', 'Insane'],
+                value: this.videoQuality(),
+            },
         ]);
+    }
+
+    // implement
+    async putSetting(key: string, value: SettingValue) {
+        await super.putSetting(key, value);
+
+        if (key === 'videoQuality') {
+            this.provider.baseStationApiClient.postQuality(this.nativeId, this.videoQuality());
+        }
     }
 
     allowBatteryPrebuffer(): boolean {
         return this.storage.getItem('allowBatteryPrebuffer') === 'true';
+    }
+
+    videoQuality(): string {
+        return this.storage.getItem('videoQuality') || 'Subscription';
     }
 }
