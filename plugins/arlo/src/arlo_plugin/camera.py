@@ -1,26 +1,68 @@
+from __future__ import annotations
+
 import asyncio
+from datetime import datetime, timedelta
 import json
 import threading
 import time
+from typing import List, TYPE_CHECKING
 
 import scrypted_arlo_go
 
 import scrypted_sdk
-from scrypted_sdk.types import Settings, Camera, VideoCamera, MotionSensor, Battery, MediaObject, ScryptedMimeTypes, ScryptedInterface, ScryptedDeviceType
+from scrypted_sdk.types import Setting, Settings, Device, Camera, VideoCamera, VideoClips, VideoClip, VideoClipOptions, MotionSensor, Battery, DeviceProvider, MediaObject, ResponsePictureOptions, ResponseMediaStreamOptions, ScryptedMimeTypes, ScryptedInterface, ScryptedDeviceType
 
-from .device_base import ArloDeviceBase
-from .provider import ArloProvider
+from .base import ArloDeviceBase
+from .spotlight import ArloSpotlight, ArloFloodlight
+from .vss import ArloSirenVirtualSecuritySystem
 from .child_process import HeartbeatChildProcess
 from .util import BackgroundTaskMixin
 
+if TYPE_CHECKING:
+    # https://adamj.eu/tech/2021/05/13/python-type-hints-how-to-fix-circular-imports/
+    from .provider import ArloProvider
 
-class ArloCamera(ArloDeviceBase, Settings, Camera, VideoCamera, MotionSensor, Battery):
+
+class ArloCamera(ArloDeviceBase, Settings, Camera, VideoCamera, DeviceProvider, VideoClips, MotionSensor, Battery):
+    MODELS_WITH_SPOTLIGHTS = [
+        "vmc4040p",
+        "vmc2030",
+        "vmc2032",
+        "vmc4041p",
+        "vmc4050p",
+        "vmc5040",
+        "vml2030",
+        "vml4030",
+    ]
+
+    MODELS_WITH_FLOODLIGHTS = ["fb1001"]
+
+    MODELS_WITH_SIRENS = [
+        "vmb4000",
+        "vmb4500",
+        "vmb4540",
+        "vmb5000",
+        "vmc4040p",
+        "fb1001",
+        "vmc2030",
+        "vmc2020",
+        "vmc2032",
+        "vmc4041p",
+        "vmc4050p",
+        "vmc5040",
+        "vml2030",
+        "vmc4030",
+        "vml4030",
+        "vmc4030p",
+    ]
+
     timeout: int = 30
     intercom_session = None
+    light: ArloSpotlight = None
+    vss: ArloSirenVirtualSecuritySystem = None
 
     def __init__(self, nativeId: str, arlo_device: dict, arlo_basestation: dict, provider: ArloProvider) -> None:
         super().__init__(nativeId=nativeId, arlo_device=arlo_device, arlo_basestation=arlo_basestation, provider=provider)
-
         self.start_motion_subscription()
         self.start_battery_subscription()
 
@@ -42,7 +84,7 @@ class ArloCamera(ArloDeviceBase, Settings, Camera, VideoCamera, MotionSensor, Ba
             self.provider.arlo.SubscribeToBatteryEvents(self.arlo_basestation, self.arlo_device, callback)
         )
 
-    def get_applicable_interfaces(self) -> list:
+    def get_applicable_interfaces(self) -> List[str]:
         results = set([
             ScryptedInterface.VideoCamera.value,
             ScryptedInterface.Camera.value,
@@ -59,6 +101,12 @@ class ArloCamera(ArloDeviceBase, Settings, Camera, VideoCamera, MotionSensor, Ba
             results.add(ScryptedInterface.RTCSignalingChannel.value)
             results.discard(ScryptedInterface.Intercom.value)
 
+        if self.has_siren or self.has_spotlight or self.has_floodlight:
+            results.add(ScryptedInterface.DeviceProvider.value)
+
+        if self.has_cloud_recording:
+            results.add(ScryptedInterface.VideoClips.value)
+
         if not self._can_push_to_talk():
             results.discard(ScryptedInterface.RTCSignalingChannel.value)
             results.discard(ScryptedInterface.Intercom.value)
@@ -67,6 +115,42 @@ class ArloCamera(ArloDeviceBase, Settings, Camera, VideoCamera, MotionSensor, Ba
 
     def get_device_type(self) -> str:
         return ScryptedDeviceType.Camera.value
+
+    def get_builtin_child_device_manifests(self) -> List[Device]:
+        results = []
+        if self.has_spotlight or self.has_floodlight:
+            light = self.get_or_create_spotlight_or_floodlight()
+            results.append({
+                "info": {
+                    "model": f"{self.arlo_device['modelId']} {self.arlo_device['properties'].get('hwVersion', '')}".strip(),
+                    "manufacturer": "Arlo",
+                    "firmware": self.arlo_device.get("firmwareVersion"),
+                    "serialNumber": self.arlo_device["deviceId"],
+                },
+                "nativeId": light.nativeId,
+                "name": f'{self.arlo_device["deviceName"]} {"Spotlight" if self.has_spotlight else "Floodlight"}',
+                "interfaces": light.get_applicable_interfaces(),
+                "type": light.get_device_type(),
+                "providerNativeId": self.nativeId,
+            })
+        if self.has_siren:
+            vss = self.get_or_create_vss()
+            results.extend([
+                {
+                    "info": {
+                        "model": f"{self.arlo_device['modelId']} {self.arlo_device['properties'].get('hwVersion', '')}".strip(),
+                        "manufacturer": "Arlo",
+                        "firmware": self.arlo_device.get("firmwareVersion"),
+                        "serialNumber": self.arlo_device["deviceId"],
+                    },
+                    "nativeId": vss.nativeId,
+                    "name": f'{self.arlo_device["deviceName"]} Siren Virtual Security System',
+                    "interfaces": vss.get_applicable_interfaces(),
+                    "type": vss.get_device_type(),
+                    "providerNativeId": self.nativeId,
+                },
+            ] + vss.get_builtin_child_device_manifests())
+        return results
 
     @property
     def webrtc_emulation(self) -> bool:
@@ -85,7 +169,23 @@ class ArloCamera(ArloDeviceBase, Settings, Camera, VideoCamera, MotionSensor, Ba
         else:
             return True
 
-    async def getSettings(self) -> list:
+    @property
+    def has_cloud_recording(self) -> bool:
+        return self.provider.arlo.GetSmartFeatures(self.arlo_device)["planFeatures"]["eventRecording"]
+
+    @property
+    def has_spotlight(self) -> bool:
+        return any([self.arlo_device["modelId"].lower().startswith(model) for model in ArloCamera.MODELS_WITH_SPOTLIGHTS])
+
+    @property
+    def has_floodlight(self) -> bool:
+        return any([self.arlo_device["modelId"].lower().startswith(model) for model in ArloCamera.MODELS_WITH_FLOODLIGHTS])
+
+    @property
+    def has_siren(self) -> bool:
+        return any([self.arlo_device["modelId"].lower().startswith(model) for model in ArloCamera.MODELS_WITH_SIRENS])
+
+    async def getSettings(self) -> List[Setting]:
         if self._can_push_to_talk():
             return [
                 {
@@ -109,9 +209,9 @@ class ArloCamera(ArloDeviceBase, Settings, Camera, VideoCamera, MotionSensor, Ba
     async def putSetting(self, key, value) -> None:
         if key in ["webrtc_emulation", "two_way_audio"]:
             self.storage.setItem(key, value == "true")
-            await self.provider.discoverDevices()
+            await self.provider.discover_devices()
 
-    async def getPictureOptions(self) -> list:
+    async def getPictureOptions(self) -> List[ResponsePictureOptions]:
         return []
 
     async def takePicture(self, options: dict = None) -> MediaObject:
@@ -131,7 +231,7 @@ class ArloCamera(ArloDeviceBase, Settings, Camera, VideoCamera, MotionSensor, Ba
 
         return await scrypted_sdk.mediaManager.createMediaObject(str.encode(pic_url), ScryptedMimeTypes.Url.value)
 
-    async def getVideoStreamOptions(self) -> list:
+    async def getVideoStreamOptions(self) -> List[ResponseMediaStreamOptions]:
         return [
             {
                 "id": 'default',
@@ -200,20 +300,109 @@ class ArloCamera(ArloDeviceBase, Settings, Camera, VideoCamera, MotionSensor, Ba
         except Exception as e:
             self.logger.error(e)
 
-    async def startIntercom(self, media):
+    async def startIntercom(self, media) -> None:
         self.logger.info("Starting intercom")
         self.intercom_session = ArloCameraRTCSignalingSession(self)
         await self.intercom_session.initialize_push_to_talk(media)
 
-    async def stopIntercom(self):
+    async def stopIntercom(self) -> None:
         self.logger.info("Stopping intercom")
         if self.intercom_session is not None:
             await self.intercom_session.shutdown()
             self.intercom_session = None
 
-    def _can_push_to_talk(self):
+    def _can_push_to_talk(self) -> bool:
         # Right now, only implement push to talk for basestation cameras
         return self.arlo_device["deviceId"] != self.arlo_device["parentId"]
+
+    async def getVideoClip(self, videoId: str) -> MediaObject:
+        self.logger.info(f"Getting video clip {videoId}")
+
+        id_as_time = int(videoId) / 1000.0
+        start = datetime.fromtimestamp(id_as_time) - timedelta(seconds=10)
+        end = datetime.fromtimestamp(id_as_time) + timedelta(seconds=10)
+
+        library = self.provider.arlo.GetLibrary(self.arlo_device, start, end)
+        for recording in library:
+            if videoId == recording["name"]:
+                return await scrypted_sdk.mediaManager.createMediaObjectFromUrl(recording["presignedContentUrl"])
+        self.logger.warn(f"Clip {videoId} not found")
+        return None
+
+    async def getVideoClipThumbnail(self, thumbnailId: str) -> MediaObject:
+        self.logger.info(f"Getting video clip thumbnail {thumbnailId}")
+
+        id_as_time = int(thumbnailId) / 1000.0
+        start = datetime.fromtimestamp(id_as_time) - timedelta(seconds=10)
+        end = datetime.fromtimestamp(id_as_time) + timedelta(seconds=10)
+
+        library = self.provider.arlo.GetLibrary(self.arlo_device, start, end)
+        for recording in library:
+            if thumbnailId == recording["name"]:
+                return await scrypted_sdk.mediaManager.createMediaObjectFromUrl(recording["presignedThumbnailUrl"])
+        self.logger.warn(f"Clip thumbnail {thumbnailId} not found")
+        return None
+
+    async def getVideoClips(self, options: VideoClipOptions = None) -> List[VideoClip]:
+        self.logger.info(f"Fetching remote video clips {options}")
+
+        start = datetime.fromtimestamp(options["startTime"] / 1000.0)
+        end = datetime.fromtimestamp(options["endTime"] / 1000.0)
+
+        library = self.provider.arlo.GetLibrary(self.arlo_device, start, end)
+        clips = []
+        for recording in library:
+            clip = {
+                "duration": recording["mediaDurationSecond"] * 1000.0,
+                "id": recording["name"],
+                "thumbnailId": recording["name"],
+                "videoId": recording["name"],
+                "startTime": recording["utcCreatedDate"],
+                "description": recording["reason"],
+                "resources": {
+                    "thumbnail": {
+                        "href": recording["presignedThumbnailUrl"],
+                    },
+                    "video": {
+                        "href": recording["presignedContentUrl"],
+                    },
+                },
+            }
+            clips.append(clip)
+
+        if options.get("reverseOrder"):
+            clips.reverse()
+        return clips
+
+    @ArloDeviceBase.async_print_exception_guard
+    async def removeVideoClips(self, videoClipIds: List[str]) -> None:
+        # Arlo does support deleting, but let's be safe and disable that
+        raise Exception("deleting Arlo video clips is not implemented by this plugin")
+
+    async def getDevice(self, nativeId: str) -> ArloDeviceBase:
+        if (nativeId.endswith("spotlight") and self.has_spotlight) or (nativeId.endswith("floodlight") and self.has_floodlight):
+            return self.get_or_create_spotlight_or_floodlight()
+        if nativeId.endswith("vss") and self.has_siren:
+            return self.get_or_create_vss()
+        return None
+
+    def get_or_create_spotlight_or_floodlight(self) -> ArloSpotlight:
+        if self.has_spotlight:
+            light_id = f'{self.arlo_device["deviceId"]}.spotlight'
+            if not self.light:
+                self.light = ArloSpotlight(light_id, self.arlo_device, self.arlo_basestation, self.provider, self)
+        elif self.has_floodlight:
+            light_id = f'{self.arlo_device["deviceId"]}.floodlight'
+            if not self.light:
+                self.light = ArloFloodlight(light_id, self.arlo_device, self.arlo_basestation, self.provider, self)
+        return self.light
+
+    def get_or_create_vss(self) -> ArloSirenVirtualSecuritySystem:
+        if self.has_siren:
+            vss_id = f'{self.arlo_device["deviceId"]}.vss'
+            if not self.vss:
+                self.vss = ArloSirenVirtualSecuritySystem(vss_id, self.arlo_device, self.arlo_basestation, self.provider, self)
+        return self.vss
 
 
 class ArloCameraRTCSignalingSession(BackgroundTaskMixin):

@@ -446,24 +446,23 @@ async function start(mainFilename: string, options?: {
 
     let hasLogin = await db.getCount(ScryptedUser) > 0;
 
+    if (process.env.SCRYPTED_ADMIN_USERNAME && process.env.SCRYPTED_ADMIN_TOKEN) {
+        let user = await db.tryGet(ScryptedUser, process.env.SCRYPTED_ADMIN_USERNAME);
+        if (!user) {
+            user = new ScryptedUser();
+            user._id = process.env.SCRYPTED_ADMIN_USERNAME;
+            setScryptedUserPassword(user, crypto.randomBytes(8).toString('hex'), Date.now());
+            user.token = crypto.randomBytes(16).toString('hex');
+            await db.upsert(user);
+            hasLogin = true;
+        }
+    }
+
     app.options('/login', (req, res) => {
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Content-Length, X-Requested-With');
         res.send(200);
     });
-
-    const resetLogin = path.join(getScryptedVolume(), 'reset-login');
-    async function checkResetLogin() {
-        try {
-            if (fs.existsSync(resetLogin)) {
-                fs.rmSync(resetLogin);
-                await db.removeAll(ScryptedUser);
-                hasLogin = false;
-            }
-        }
-        catch (e) {
-        }
-    }
 
     app.post('/login', async (req, res) => {
         const { username, password, change_password, maxAge: maxAgeRequested } = req.body;
@@ -550,6 +549,19 @@ async function start(mainFilename: string, options?: {
         });
     });
 
+    const resetLogin = path.join(getScryptedVolume(), 'reset-login');
+    async function checkResetLogin() {
+        try {
+            if (fs.existsSync(resetLogin)) {
+                fs.rmSync(resetLogin);
+                await db.removeAll(ScryptedUser);
+                hasLogin = false;
+            }
+        }
+        catch (e) {
+        }
+    }
+
     app.get('/login', async (req, res) => {
         await checkResetLogin();
 
@@ -558,7 +570,11 @@ async function start(mainFilename: string, options?: {
 
         // env/header based admin login
         if (res.locals.username && res.locals.username === process.env.SCRYPTED_ADMIN_USERNAME) {
+            const userToken = new UserToken(res.locals.username, undefined, Date.now());
+
             res.send({
+                ...createTokens(userToken),
+                expiration: ONE_DAY_MILLISECONDS,
                 username: res.locals.username,
                 token: process.env.SCRYPTED_ADMIN_TOKEN,
                 addresses,

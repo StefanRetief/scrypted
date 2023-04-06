@@ -1291,6 +1291,7 @@ export interface ObjectDetector {
 }
 export interface ObjectDetectionGeneratorSession {
   settings?: { [key: string]: any };
+  sourceId?: string;
 }
 export interface ObjectDetectionSession extends ObjectDetectionGeneratorSession {
   detectionId?: string;
@@ -1321,6 +1322,7 @@ export interface ObjectDetection {
   detectObjects(mediaObject: MediaObject, session?: ObjectDetectionSession, callbacks?: ObjectDetectionCallbacks): Promise<ObjectsDetected>;
   getDetectionModel(settings?: { [key: string]: any }): Promise<ObjectDetectionModel>;
 }
+export type ImageFormat = 'gray' | 'rgba' | 'rgb' | 'jpg';
 export interface ImageOptions {
   crop?: {
     left: number;
@@ -1332,11 +1334,17 @@ export interface ImageOptions {
     width?: number,
     height?: number,
   };
-  format?: 'gray' | 'rgba' | 'rgb' | 'jpg';
+  format?: ImageFormat;
 }
 export interface Image {
   width: number;
   height: number;
+  /**
+   * The in raw memory format of this image.
+   * Operations of this image may only safely request
+   * this format, or a compressed format such as jpg.
+   */
+  format?: ImageFormat;
   toBuffer(options?: ImageOptions): Promise<Buffer>;
   toImage(options?: ImageOptions): Promise<Image & MediaObject>;
 }
