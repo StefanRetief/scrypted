@@ -1,0 +1,21 @@
+name: Sync Fork - main
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # every 30 minutes
+  workflow_dispatch: # on button click
+
+jobs:
+  sync:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: tgymnich/fork-sync@v1.8
+        with:
+          base: main
+          head: main
+      - uses: tgymnich/fork-sync@v1.8
+        with:
+          base: arlo-local
+          head: arlo-local
