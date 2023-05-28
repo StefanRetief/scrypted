@@ -5,19 +5,14 @@ on:
     - cron: '*/30 * * * *' # every 30 minutes
   workflow_dispatch: # on button click
 
-jobs:
+jobs:          
   sync:
-
     runs-on: ubuntu-latest
-
     steps:
-      - uses: tgymnich/fork-sync@v1.8
-        with:
-          token: ${{ secrets.PERSONAL_TOKEN }}
-          base: main
-          head: main
       - uses: tgymnich/fork-sync@v1.8
         with:
           token: ${{ secrets.PERSONAL_TOKEN }}
           base: arlo-local
           head: arlo-local
+  
+      
