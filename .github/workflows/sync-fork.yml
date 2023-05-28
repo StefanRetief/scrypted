@@ -13,9 +13,11 @@ jobs:
     steps:
       - uses: tgymnich/fork-sync@v1.8
         with:
+          token: ${{ secrets.PERSONAL_TOKEN }}
           base: main
           head: main
       - uses: tgymnich/fork-sync@v1.8
         with:
+          token: ${{ secrets.PERSONAL_TOKEN }}
           base: arlo-local
           head: arlo-local
