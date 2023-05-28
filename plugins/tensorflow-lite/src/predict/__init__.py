@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
 import re
 import urllib.request
@@ -16,15 +17,24 @@ from detect import DetectPlugin
 from .rectangle import (Rectangle, combine_rect, from_bounding_box,
                         intersect_area, intersect_rect, to_bounding_box)
 
-def ensureRGBData(data: bytes, size: Tuple[int, int], format: str):
-    if format == 'rgba':
+# vips is already multithreaded, but needs to be kicked off the python asyncio thread.
+toThreadExecutor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="image")
+
+async def to_thread(f):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(toThreadExecutor, f)
+
+async def ensureRGBData(data: bytes, size: Tuple[int, int], format: str):
+    if format != 'rgba':
+        return Image.frombuffer('RGB', size, data)
+
+    def convert():
         rgba = Image.frombuffer('RGBA', size, data)
         try:
             return rgba.convert('RGB')
         finally:
             rgba.close()
-    else:
-        return Image.frombuffer('RGB', size, data)
+    return await to_thread(convert)
 
 def parse_label_contents(contents: str):
     lines = contents.splitlines()
@@ -36,13 +46,6 @@ def parse_label_contents(contents: str):
         else:
             ret[row_number] = content.strip()
     return ret
-
-class RawImage:
-    jpegMediaObject: scrypted_sdk.MediaObject
-
-    def __init__(self, image: Image.Image):
-        self.image = image
-        self.jpegMediaObject = None
 
 def is_same_box(bb1, bb2, threshold = .7):
     r1 = from_bounding_box(bb1)
@@ -107,13 +110,8 @@ class Prediction:
 class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Settings):
     labels: dict
 
-    def __init__(self, PLUGIN_MIME_TYPE: str, nativeId: str | None = None):
+    def __init__(self, nativeId: str | None = None):
         super().__init__(nativeId=nativeId)
-
-        self.fromMimeType = PLUGIN_MIME_TYPE
-        self.toMimeType = scrypted_sdk.ScryptedMimeTypes.MediaObject.value
-
-        self.crop = False
 
         # periodic restart because there seems to be leaks in tflite or coral API.
         loop = asyncio.get_event_loop()
@@ -136,10 +134,6 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
     def getTriggerClasses(self) -> list[str]:
         return ['motion']
 
-    async def createMedia(self, data: RawImage) -> scrypted_sdk.MediaObject:
-        mo = await scrypted_sdk.mediaManager.createMediaObject(data, self.fromMimeType)
-        return mo
-
     def requestRestart(self):
         asyncio.ensure_future(scrypted_sdk.deviceManager.requestRestart())
 
@@ -148,27 +142,9 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
         pass
 
     def getModelSettings(self, settings: Any = None) -> list[Setting]:
-        allowList: Setting = {
-            'title': 'Detections Types',
-            # 'subgroup': 'Advanced',
-            'description': 'The detections that will be reported. If none are specified, all detections will be reported. Select only detection types of interest for optimal performance.',
-            'choices': self.getClasses(),
-            'multiple': True,
-            'key': 'allowList',
-            'value': [
-                'person',
-                'dog',
-                'cat',
-                'car',
-                'truck',
-                'bus',
-                'motorcycle',
-            ],
-        }
+        return []
 
-        return [allowList]
-
-    def create_detection_result(self, objs: List[Prediction], size, allowList, convert_to_src_size=None) -> ObjectsDetected:
+    def create_detection_result(self, objs: List[Prediction], size, convert_to_src_size=None) -> ObjectsDetected:
         detections: List[ObjectDetectionResult] = []
         detection_result: ObjectsDetected = {}
         detection_result['detections'] = detections
@@ -176,8 +152,6 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
 
         for obj in objs:
             className = self.labels.get(obj.id, obj.id)
-            if allowList and len(allowList) and className not in allowList:
-                continue
             detection: ObjectDetectionResult = {}
             detection['boundingBox'] = (
                 obj.bbox.xmin, obj.bbox.ymin, obj.bbox.xmax - obj.bbox.xmin, obj.bbox.ymax - obj.bbox.ymin)
@@ -190,12 +164,9 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
             detection_result['detections'] = []
             for detection in detections:
                 bb = detection['boundingBox']
-                x, y, valid = convert_to_src_size((bb[0], bb[1]), True)
-                x2, y2, valid2 = convert_to_src_size(
-                    (bb[0] + bb[2], bb[1] + bb[3]), True)
-                if not valid or not valid2:
-                    # print("filtering out", detection['className'])
-                    continue
+                x, y = convert_to_src_size((bb[0], bb[1]))
+                x2, y2 = convert_to_src_size(
+                    (bb[0] + bb[2], bb[1] + bb[3]))
                 detection['boundingBox'] = (x, y, x2 - x + 1, y2 - y + 1)
                 detection_result['detections'].append(detection)
 
@@ -215,27 +186,40 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
     async def detect_once(self, input: Image.Image, settings: Any, src_size, cvss) -> ObjectsDetected:
         pass
 
-    async def run_detection_videoframe(self, videoFrame: scrypted_sdk.VideoFrame, detection_session: ObjectDetectionSession) -> ObjectsDetected:
+    async def run_detection_image(self, image: scrypted_sdk.Image, detection_session: ObjectDetectionSession) -> ObjectsDetected:
         settings = detection_session and detection_session.get('settings')
-        src_size = videoFrame.width, videoFrame.height
+        src_size = image.width, image.height
         w, h = self.get_input_size()
+        input_aspect_ratio = w / h
         iw, ih = src_size
+        src_aspect_ratio = iw / ih
         ws = w / iw
         hs = h / ih
         s = max(ws, hs)
-        if ws == 1 and hs == 1:
-            def cvss(point, normalize=False):
-                return point[0], point[1], True
 
-            data = await videoFrame.toBuffer({
-                'format': videoFrame.format or 'rgb',
+        # image is already correct aspect ratio, so it can be processed in a single pass.
+        if input_aspect_ratio == src_aspect_ratio:
+            def cvss(point):
+                return point[0] / s, point[1] / s
+
+            # aspect ratio matches, but image must be scaled.
+            resize = None
+            if ih != w:
+                resize = {
+                    'width': w,
+                    'height': h,
+                }
+
+            data = await image.toBuffer({
+                'resize': resize,
+                'format': image.format or 'rgb',
             })
-            image = ensureRGBData(data, (w, h), videoFrame.format)
+            single = await ensureRGBData(data, (w, h), image.format)
             try:
-                ret = await self.detect_once(image, settings, src_size, cvss)
+                ret = await self.detect_once(single, settings, src_size, cvss)
                 return ret
             finally:
-                image.close()
+                single.close()
 
         sw = int(w / s)
         sh = int(h / s)
@@ -247,7 +231,7 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
         second_crop = (ow, oh, ow + sw, oh + sh)
 
         firstData, secondData = await asyncio.gather(
-            videoFrame.toBuffer({
+            image.toBuffer({
                 'resize': {
                     'width': w,
                     'height': h,
@@ -258,9 +242,9 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
                     'width': sw,
                     'height': sh,
                 },
-                'format': videoFrame.format or 'rgb',
+                'format': image.format or 'rgb',
             }),
-            videoFrame.toBuffer({
+            image.toBuffer({
                 'resize': {
                     'width': w,
                     'height': h,
@@ -271,17 +255,19 @@ class PredictPlugin(DetectPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
                     'width': sw,
                     'height': sh,
                 },
-                'format': videoFrame.format or 'rgb',
+                'format': image.format or 'rgb',
             })
         )
 
-        first = ensureRGBData(firstData, (w, h), videoFrame.format)
-        second = ensureRGBData(secondData, (w, h), videoFrame.format)
+        first, second = await asyncio.gather(
+            ensureRGBData(firstData, (w, h), image.format),
+            ensureRGBData(secondData, (w, h), image.format)
+        )
 
-        def cvss1(point, normalize=False):
-            return point[0] / s, point[1] / s, True
-        def cvss2(point, normalize=False):
-            return point[0] / s + ow, point[1] / s + oh, True
+        def cvss1(point):
+            return point[0] / s, point[1] / s
+        def cvss2(point):
+            return point[0] / s + ow, point[1] / s + oh
 
         ret1 = await self.detect_once(first, settings, src_size, cvss1)
         first.close()

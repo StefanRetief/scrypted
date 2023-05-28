@@ -7,6 +7,7 @@ import { timeoutPromise } from "../../../common/src/promise-utils";
 import { BrowserSignalingSession, waitPeerConnectionIceConnected, waitPeerIceConnectionClosed } from "../../../common/src/rtc-signaling";
 import { DataChannelDebouncer } from "../../../plugins/webrtc/src/datachannel-debouncer";
 import type { IOSocket } from '../../../server/src/io';
+import { MediaObject } from '../../../server/src/plugin/mediaobject';
 import type { MediaObjectRemote } from '../../../server/src/plugin/plugin-api';
 import { attachPluginRemote } from '../../../server/src/plugin/plugin-remote';
 import { RpcPeer } from '../../../server/src/rpc';
@@ -77,16 +78,39 @@ export interface ScryptedClientOptions extends Partial<ScryptedLoginOptions> {
     transports?: string[];
 }
 
+function isInstalledApp() {
+    return globalThis.navigator?.userAgent.includes('InstalledApp');
+}
+
 function isRunningStandalone() {
-    return globalThis.matchMedia?.('(display-mode: standalone)').matches || globalThis.navigator?.userAgent.includes('InstalledApp');
+    return globalThis.matchMedia?.('(display-mode: standalone)').matches || isInstalledApp();
 }
 
 export async function logoutScryptedClient(baseUrl?: string) {
-    const url = baseUrl ? new URL('/logout', baseUrl).toString() : '/logout';
+    const url = combineBaseUrl(baseUrl, 'logout');
     const response = await axios(url, {
         withCredentials: true,
     });
     return response.data;
+}
+
+export function getCurrentBaseUrl() {
+    // an endpoint within scrypted will be served at /endpoint/[org/][id]
+    // find the endpoint prefix and anything prior to that will be the server base url.
+    const url = new URL(window.location.href);
+    url.search = '';
+    url.hash = '';
+    let endpointPath = window.location.pathname;
+    const parts = endpointPath.split('/');
+    const index = parts.findIndex(p => p === 'endpoint');
+    if (index === -1) {
+        // console.warn('path not recognized, does not contain the segment "endpoint".')
+        return undefined;
+    }
+    const keep = parts.slice(0, index);
+    keep.push('');
+    url.pathname = keep.join('/');
+    return url.toString();
 }
 
 export async function loginScryptedClient(options: ScryptedLoginOptions) {
@@ -95,7 +119,7 @@ export async function loginScryptedClient(options: ScryptedLoginOptions) {
     if (!maxAge && isRunningStandalone())
         maxAge = 365 * 24 * 60 * 60 * 1000;
 
-    const url = `${baseUrl || ''}/login`;
+    const url = combineBaseUrl(baseUrl, 'login');
     const response = await axios.post(url, {
         username,
         password,
@@ -128,7 +152,7 @@ export async function loginScryptedClient(options: ScryptedLoginOptions) {
 
 export async function checkScryptedClientLogin(options?: ScryptedConnectionOptions) {
     let { baseUrl } = options || {};
-    const url = `${baseUrl || ''}/login`;
+    const url = combineBaseUrl(baseUrl, 'login');
     const response = await axios.get(url, {
         withCredentials: true,
         ...options?.axiosConfig,
@@ -144,6 +168,7 @@ export async function checkScryptedClientLogin(options?: ScryptedConnectionOptio
         error: response.data.error as string,
         authorization: response.data.authorization as string,
         queryToken: response.data.queryToken as any,
+        token: response.data.token as string,
         addresses: response.data.addresses as string[],
         scryptedCloud,
         directAddress,
@@ -174,9 +199,12 @@ export function redirectScryptedLogin(options?: {
     globalThis.location.href = redirect_uri;
 }
 
+export function combineBaseUrl(baseUrl: string, rootPath: string) {
+    return baseUrl ? new URL(rootPath, baseUrl).toString() : '/' + rootPath;
+}
+
 export async function redirectScryptedLogout(baseUrl?: string) {
-    baseUrl = baseUrl || '';
-    globalThis.location.href = `${baseUrl}/logout`;
+    globalThis.location.href = combineBaseUrl(baseUrl, 'logout');
 }
 
 export async function connectScryptedClient(options: ScryptedClientOptions): Promise<ScryptedClientStatic> {
@@ -218,9 +246,10 @@ export async function connectScryptedClient(options: ScryptedClientOptions): Pro
     }
 
     let socket: IOClientSocket;
-    const endpointPath = `/endpoint/${pluginId}`;
+    const eioPath = `endpoint/${pluginId}/engine.io/api`;
+    const eioEndpoint = baseUrl ? new URL(eioPath, baseUrl).pathname : '/' + eioPath;
     const eioOptions: Partial<SocketOptions> = {
-        path: `${endpointPath}/engine.io/api`,
+        path: eioEndpoint,
         withCredentials: true,
         extraHeaders,
         rejectUnauthorized: false,
@@ -237,14 +266,15 @@ export async function connectScryptedClient(options: ScryptedClientOptions): Pro
     // if the cert has been accepted. Other browsers seem fine.
     // So the default is not to connect to IP addresses on Chrome, but do so on other browsers.
     const isChrome = globalThis.navigator?.userAgent.includes('Chrome');
+    const isNotChromeOrIsInstalledApp = !isChrome || isInstalledApp();
 
     const addresses: string[] = [];
-    const localAddressDefault = !isChrome;
+    const localAddressDefault = isNotChromeOrIsInstalledApp;
     if (((scryptedCloud && options.local === undefined && localAddressDefault) || options.local) && localAddresses) {
         addresses.push(...localAddresses);
     }
 
-    const directAddressDefault = directAddress && (!isChrome || !isIPAddress(directAddress));
+    const directAddressDefault = directAddress && (isNotChromeOrIsInstalledApp || !isIPAddress(directAddress));
     if (((scryptedCloud && options.direct === undefined && directAddressDefault) || options.direct) && directAddress) {
         addresses.push(directAddress);
     }
@@ -505,22 +535,7 @@ export async function connectScryptedClient(options: ScryptedClientOptions): Pro
         console.log('api attached', Date.now() - start);
 
         mediaManager.createMediaObject = async<T extends MediaObjectOptions>(data: any, mimeType: string, options: T) => {
-            const mo: MediaObjectRemote & {
-                [RpcPeer.PROPERTY_PROXY_PROPERTIES]: any,
-                [RpcPeer.PROPERTY_JSON_DISABLE_SERIALIZATION]: true,
-            } = {
-                [RpcPeer.PROPERTY_JSON_DISABLE_SERIALIZATION]: true,
-                [RpcPeer.PROPERTY_PROXY_PROPERTIES]: {
-                    mimeType,
-                    sourceId: options?.sourceId,
-                },
-                mimeType,
-                sourceId: options?.sourceId,
-                async getData() {
-                    return data;
-                },
-            };
-            return mo as any;
+            return new MediaObject(mimeType, data, options) as any;
         }
 
         const { browserSignalingSession, connectionManagementId, updateSessionId } = rpcPeer.params;

@@ -32,12 +32,9 @@ def parse_label_contents(contents: str):
             ret[row_number] = content.strip()
     return ret
 
-
-MIME_TYPE = 'x-scrypted-tensorflow-lite/x-raw-image'
-
 class TensorFlowLitePlugin(PredictPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Settings):
     def __init__(self, nativeId: str | None = None):
-        super().__init__(MIME_TYPE, nativeId=nativeId)
+        super().__init__(nativeId=nativeId)
 
         tfliteFile = self.downloadFile('https://raw.githubusercontent.com/google-coral/test_data/master/ssd_mobilenet_v2_coco_quant_postprocess.tflite', 'ssd_mobilenet_v2_coco_quant_postprocess.tflite')
         edgetpuFile = self.downloadFile('https://raw.githubusercontent.com/google-coral/test_data/master/ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite', 'ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite')
@@ -133,6 +130,5 @@ class TensorFlowLitePlugin(PredictPlugin, scrypted_sdk.BufferConverter, scrypted
 
         objs = await asyncio.get_event_loop().run_in_executor(self.executor, predict)
 
-        allowList = settings.get('allowList', None) if settings else None
-        ret = self.create_detection_result(objs, src_size, allowList, cvss)
+        ret = self.create_detection_result(objs, src_size, cvss)
         return ret

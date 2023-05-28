@@ -139,6 +139,7 @@ class Arlo(object):
     def LoginMFA(self):
         self.request = Request()
 
+        # Authenticate
         headers = {
             'DNT': '1',
             'schemaVersion': '1',
@@ -150,8 +151,6 @@ class Arlo(object):
             'Source': 'arloCamWeb',
             'TE': 'Trailers',
         }
-
-        # Authenticate
         auth_body = self.request.post(
             f'https://{self.AUTH_URL}/api/auth',
             params={
@@ -182,7 +181,7 @@ class Arlo(object):
         # Start factor auth
         start_auth_body = self.request.post(
             f'https://{self.AUTH_URL}/api/startAuth',
-            {'factorId': factor_id},
+            params={'factorId': factor_id},
             headers=headers,
             raw=True
         )
@@ -193,7 +192,7 @@ class Arlo(object):
 
             finish_auth_body = self.request.post(
                 f'https://{self.AUTH_URL}/api/finishAuth',
-                {
+                params={
                     'factorAuthCode': factor_auth_code,
                     'otp': code
                 },
@@ -349,7 +348,7 @@ class Arlo(object):
         body['from'] = self.user_id+'_web'
         body['to'] = basestation_id
 
-        self.request.post(f'https://{self.BASE_URL}/hmsweb/users/devices/notify/'+body['to'], body, headers={"xcloudId":basestation.get('xCloudId')})
+        self.request.post(f'https://{self.BASE_URL}/hmsweb/users/devices/notify/'+body['to'], params=body, headers={"xcloudId":basestation.get('xCloudId')})
         return body.get('transId')
 
     def Ping(self, basestation):
@@ -381,6 +380,33 @@ class Arlo(object):
 
         return asyncio.get_event_loop().create_task(
             self.HandleEvents(basestation, resource, [('is', 'motionDetected')], callbackwrapper)
+        )
+
+    def SubscribeToAudioEvents(self, basestation, camera, callback):
+        """
+        Use this method to subscribe to audio events. You must provide a callback function which will get called once per audio event.
+
+        The callback function should have the following signature:
+        def callback(self, event)
+
+        This is an example of handling a specific event, in reality, you'd probably want to write a callback for HandleEvents()
+        that has a big switch statement in it to handle all the various events Arlo produces.
+
+        Returns the Task object that contains the subscription loop.
+        """
+        resource = f"cameras/{camera.get('deviceId')}"
+
+        def callbackwrapper(self, event):
+            properties = event.get('properties', {})
+            stop = None
+            if 'audioDetected' in properties:
+                stop = callback(properties['audioDetected'])
+            if not stop:
+                return None
+            return stop
+
+        return asyncio.get_event_loop().create_task(
+            self.HandleEvents(basestation, resource, [('is', 'audioDetected')], callbackwrapper)
         )
 
     def SubscribeToBatteryEvents(self, basestation, camera, callback):
@@ -602,7 +628,7 @@ class Arlo(object):
         def trigger(self):
             nl.stream_url_dict = self.request.post(
                 f'https://{self.BASE_URL}/hmsweb/users/devices/startStream',
-                {
+                params={
                     "to": camera.get('parentId'),
                     "from": self.user_id + "_web",
                     "resource": "cameras/" + camera.get('deviceId'),
@@ -675,7 +701,7 @@ class Arlo(object):
         def trigger(self):
             self.request.post(
                 f"https://{self.BASE_URL}/hmsweb/users/devices/fullFrameSnapshot",
-                {
+                params={
                     "to": camera.get("parentId"),
                     "from": self.user_id + "_web",
                     "resource": "cameras/" + camera.get("deviceId"),
@@ -858,17 +884,17 @@ class Arlo(object):
         logger.debug(f"Library cache miss for {from_date}, {to_date}")
         return self.request.post(
             f'https://{self.BASE_URL}/hmsweb/users/library',
-            {
+            params={
                 'dateFrom': from_date,
                 'dateTo': to_date
             }
         )
 
-    def GetSmartFeatures(self, device):
+    def GetSmartFeatures(self, device) -> dict:
         smart_features = self._getSmartFeaturesCached()
         key = f"{device['owner']['ownerId']}_{device['deviceId']}"
-        return smart_features["features"].get(key)
+        return smart_features["features"].get(key, {})
 
     @cached(cache=TTLCache(maxsize=1, ttl=60))
-    def _getSmartFeaturesCached(self):
+    def _getSmartFeaturesCached(self) -> dict:
         return self.request.get(f'https://{self.BASE_URL}/hmsweb/users/subscription/smart/features')

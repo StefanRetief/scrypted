@@ -1,23 +1,42 @@
 import { Deferred } from "@scrypted/common/src/deferred";
+import { addVideoFilterArguments } from "@scrypted/common/src/ffmpeg-helpers";
 import { ffmpegLogInitialOutput, safeKillFFmpeg, safePrintFFmpegArguments } from "@scrypted/common/src/media-helpers";
 import { readLength, readLine } from "@scrypted/common/src/read-stream";
-import { addVideoFilterArguments } from "@scrypted/common/src/ffmpeg-helpers";
 import sdk, { FFmpegInput, Image, ImageOptions, MediaObject, ScryptedDeviceBase, ScryptedMimeTypes, VideoFrame, VideoFrameGenerator, VideoFrameGeneratorOptions } from "@scrypted/sdk";
 import child_process from 'child_process';
-import sharp from 'sharp';
+import type sharp from 'sharp';
 import { Readable } from 'stream';
 
-async function createVipsMediaObject(image: VipsImage): Promise<VideoFrame & MediaObject> {
+export let sharpLib: (input?:
+    | Buffer
+    | Uint8Array
+    | Uint8ClampedArray
+    | Int8Array
+    | Uint16Array
+    | Int16Array
+    | Uint32Array
+    | Int32Array
+    | Float32Array
+    | Float64Array
+    | string,
+    options?: sharp.SharpOptions) => sharp.Sharp;
+try {
+    sharpLib = require('sharp');
+}
+catch (e) {
+    console.warn('Sharp failed to load. FFmpeg Frame Generator will not function properly.')
+}
+
+async function createVipsMediaObject(image: VipsImage): Promise<Image & MediaObject> {
     const ret = await sdk.mediaManager.createMediaObject(image, ScryptedMimeTypes.Image, {
         format: null,
-        timestamp: 0,
         width: image.width,
         height: image.height,
         toBuffer: (options: ImageOptions) => image.toBuffer(options),
         toImage: async (options: ImageOptions) => {
             const newImage = await image.toVipsImage(options);
             return createVipsMediaObject(newImage);
-        }
+        },
     });
 
     return ret;
@@ -76,7 +95,20 @@ class VipsImage implements Image {
             resolveWithObject: true,
         });
 
-        const newImage = sharp(data, {
+        const sharpLib = require('sharp') as (input?:
+            | Buffer
+            | Uint8Array
+            | Uint8ClampedArray
+            | Int8Array
+            | Uint16Array
+            | Int16Array
+            | Uint32Array
+            | Int32Array
+            | Float32Array
+            | Float64Array
+            | string,
+            options?) => sharp.Sharp;
+        const newImage = sharpLib(data, {
             raw: info,
         });
 
@@ -94,7 +126,7 @@ class VipsImage implements Image {
 }
 
 export class FFmpegVideoFrameGenerator extends ScryptedDeviceBase implements VideoFrameGenerator {
-    async *generateVideoFramesInternal(mediaObject: MediaObject, options?: VideoFrameGeneratorOptions, filter?: (videoFrame: VideoFrame & MediaObject) => Promise<boolean>): AsyncGenerator<VideoFrame & MediaObject, any, unknown> {
+    async *generateVideoFramesInternal(mediaObject: MediaObject, options?: VideoFrameGeneratorOptions, filter?: (videoFrame: VideoFrame) => Promise<boolean>): AsyncGenerator<VideoFrame, any, unknown> {
         const ffmpegInput = await sdk.mediaManager.convertMediaObjectToJSON<FFmpegInput>(mediaObject, ScryptedMimeTypes.FFmpegInput);
         const gray = options?.format === 'gray';
         const channels = gray ? 1 : 3;
@@ -172,12 +204,13 @@ export class FFmpegVideoFrameGenerator extends ScryptedDeviceBase implements Vid
 
         try {
             reader();
+            const flush = async () => { };
             while (!finished) {
                 frameDeferred = new Deferred();
                 const raw = await frameDeferred.promise;
                 const { width, height, data } = raw;
 
-                const image = sharp(data, {
+                const image = sharpLib(data, {
                     raw: {
                         width,
                         height,
@@ -186,8 +219,14 @@ export class FFmpegVideoFrameGenerator extends ScryptedDeviceBase implements Vid
                 });
                 const vipsImage = new VipsImage(image, width, height, channels);
                 try {
-                    const mo = await createVipsMediaObject(vipsImage);
-                    yield mo;
+                    const image = await createVipsMediaObject(vipsImage);
+                    yield {
+                        __json_copy_serialize_children: true,
+                        timestamp: 0,
+                        queued: 0,
+                        image,
+                        flush,
+                    };
                 }
                 finally {
                     vipsImage.image = undefined;
@@ -205,7 +244,7 @@ export class FFmpegVideoFrameGenerator extends ScryptedDeviceBase implements Vid
     }
 
 
-    async generateVideoFrames(mediaObject: MediaObject, options?: VideoFrameGeneratorOptions, filter?: (videoFrame: VideoFrame & MediaObject) => Promise<boolean>): Promise<AsyncGenerator<VideoFrame & MediaObject, any, unknown>> {
+    async generateVideoFrames(mediaObject: MediaObject, options?: VideoFrameGeneratorOptions, filter?: (videoFrame: VideoFrame) => Promise<boolean>): Promise<AsyncGenerator<VideoFrame, any, unknown>> {
         return this.generateVideoFramesInternal(mediaObject, options, filter);
     }
 }

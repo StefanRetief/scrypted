@@ -5,7 +5,7 @@
     // "scrypted.serverRoot": "/home/pi/.scrypted",
 
     // docker installation
-    // "scrypted.debugHost": "192.168.2.109",
+    // "scrypted.debugHost": "koushik-ubuntu",
     // "scrypted.serverRoot": "/server",
 
     // local checkout

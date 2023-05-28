@@ -94,6 +94,8 @@ export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
         super(app);
         this.datastore = datastore;
         this.app = app;
+        // ensure that all the users are loaded from the db.
+        this.usersService.getAllUsers();
 
         this.pluginHosts.set('python', (_, pluginId, options) => new PythonRuntimeWorker(pluginId, options));
         this.pluginHosts.set('node', (mainFilename, pluginId, options) => new NodeForkWorker(mainFilename, pluginId, options));
@@ -720,6 +722,7 @@ export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
 
         this.invalidatePluginDevice(device._id);
         delete this.pluginDevices[device._id];
+        delete this.devices[device._id];
         await this.datastore.remove(device);
         this.stateManager.removeDevice(device._id);
 
@@ -824,18 +827,22 @@ export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
         return ret;
     }
 
-    killall() {
+    kill() {
         for (const host of Object.values(this.plugins)) {
             host?.kill();
         }
+    }
+
+    exit() {
+        this.kill();
         process.exit();
     }
 
     async start() {
         // catch ctrl-c
-        process.on('SIGINT', () => this.killall());
+        process.on('SIGINT', () => this.exit());
         // catch kill
-        process.on('SIGTERM', () => this.killall());
+        process.on('SIGTERM', () => this.exit());
 
         for await (const pluginDevice of this.datastore.getAll(PluginDevice)) {
             // this may happen due to race condition around deletion/update. investigate.
@@ -913,6 +920,15 @@ export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
             }
             catch (e) {
                 console.error('error probing plugin devices', plugin._id, e);
+            }
+        }
+
+        if (process.env.SCRYPTED_INSTALL_PLUGIN && !plugins.find(plugin => plugin._id === process.env.SCRYPTED_INSTALL_PLUGIN)) {
+            try {
+                await this.installNpm(process.env.SCRYPTED_INSTALL_PLUGIN);
+            }
+            catch (e) {
+                console.error('failed to auto install plugin', process.env.SCRYPTED_INSTALL_PLUGIN);
             }
         }
     }

@@ -1,3 +1,4 @@
+import traceback
 import asyncio
 import scrypted_sdk
 from scrypted_sdk import Setting, SettingValue
@@ -6,6 +7,7 @@ import gstreamer
 import libav
 import vipsimage
 import pilimage
+import time
 
 Gst = None
 try:
@@ -126,24 +128,38 @@ class PythonCodecs(scrypted_sdk.ScryptedDeviceBase, scrypted_sdk.DeviceProvider)
 def create_scrypted_plugin():
     return PythonCodecs()
 
+def multiprocess_exit():
+    import sys
+    if sys.platform == 'win32':
+        sys.exit()
+    else:
+        import os
+        os._exit(os.EX_OK)
+
 class CodecFork:
     async def generateVideoFramesGstreamer(self, mediaObject: scrypted_sdk.MediaObject, options: scrypted_sdk.VideoFrameGeneratorOptions = None, filter: Any = None, h264Decoder: str = None) -> scrypted_sdk.VideoFrame:
+        start = time.time()
         try:
             async for data in gstreamer.generateVideoFramesGstreamer(mediaObject, options, filter, h264Decoder):
                 yield data
+        except Exception as e:
+            traceback.print_exc()
+            raise
         finally:
-            import os
-            os._exit(os.EX_OK)
-            pass
+            print('gstreamer finished after %s' % (time.time() - start))
+            asyncio.get_event_loop().call_later(1, multiprocess_exit)
 
     async def generateVideoFramesLibav(self, mediaObject: scrypted_sdk.MediaObject, options: scrypted_sdk.VideoFrameGeneratorOptions = None, filter: Any = None) -> scrypted_sdk.VideoFrame:
+        start = time.time()
         try:
             async for data in libav.generateVideoFramesLibav(mediaObject, options, filter):
                 yield data
+        except Exception as e:
+            traceback.print_exc()
+            raise
         finally:
-            import os
-            os._exit(os.EX_OK)
-            pass
+            print('libav finished after %s' % (time.time() - start))
+            asyncio.get_event_loop().call_later(1, multiprocess_exit)
 
 
 async def fork():

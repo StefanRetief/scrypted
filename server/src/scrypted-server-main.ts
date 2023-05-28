@@ -192,6 +192,16 @@ async function start(mainFilename: string, options?: {
             return;
         }
 
+        // the remote address may be ipv6 prefixed so use a fuzzy match.
+        // eg ::ffff:192.168.2.124
+        if (process.env.SCRYPTED_ADMIN_USERNAME && process.env.SCRYPTED_ADMIN_ADDRESS
+            && req.socket.remoteAddress?.endsWith(process.env.SCRYPTED_ADMIN_ADDRESS)) {
+            res.locals.username = process.env.SCRYPTED_ADMIN_USERNAME;
+            res.locals.aclId = undefined;
+            next();
+            return;
+        }
+
         // this is a trap for all auth.
         // only basic auth will fail with 401. it is up to the endpoints to manage
         // lack of login from cookie auth.
@@ -203,6 +213,14 @@ async function start(mainFilename: string, options?: {
                 return;
             }
 
+            for (const user of scrypted.usersService.users.values()) {
+                if (user.token === token) {
+                    res.locals.username = user._id;
+                    res.locals.aclId = user.aclId;
+                    break;
+                }
+            }
+
             const [checkHash, ...tokenParts] = token.split('#');
             const tokenPart = tokenParts?.join('#');
             if (checkHash && tokenPart) {
@@ -212,7 +230,7 @@ async function start(mainFilename: string, options?: {
                 const sha = hash.digest().toString('hex');
 
                 if (checkHash === sha) {
-                    const userToken = validateToken(tokenPart);
+                    const userToken = checkValidUserToken(tokenPart);
                     if (userToken) {
                         res.locals.username = userToken.username;
                         res.locals.aclId = userToken.aclId;
@@ -420,19 +438,23 @@ async function start(mainFilename: string, options?: {
         return req.secure ? 'login_user_token' : 'login_user_token_insecure';
     };
 
-    const validateToken = (token: string) => {
+    const checkValidUserToken = (token: string) => {
         if (!token)
             return;
         try {
-            return UserToken.validateToken(token);
+            const userToken = UserToken.validateToken(token);
+            if (scrypted.usersService.users.has(userToken.username))
+                return userToken;
         }
         catch (e) {
-            console.warn('invalid token', e.message);
+            // console.warn('invalid token', e.message);
         }
     }
 
-    const getSignedLoginUserTokenRawValue = (req: Request<any>) => req.signedCookies[getLoginUserToken(req)] as string;
-    const getSignedLoginUserToken = (req: Request<any>) => validateToken(getSignedLoginUserTokenRawValue(req));
+    const getSignedLoginUserToken = (req: Request<any>) => {
+        const token = req.signedCookies[getLoginUserToken(req)] as string;
+        return checkValidUserToken(token)
+    };
 
     app.get('/logout', (req, res) => {
         res.clearCookie(getLoginUserToken(req));
@@ -440,20 +462,16 @@ async function start(mainFilename: string, options?: {
             res.send({});
         }
         else {
-            res.redirect('/endpoint/@scrypted/core/public/');
+            res.redirect('./endpoint/@scrypted/core/public/');
         }
     });
 
     let hasLogin = await db.getCount(ScryptedUser) > 0;
 
-    if (process.env.SCRYPTED_ADMIN_USERNAME && process.env.SCRYPTED_ADMIN_TOKEN) {
+    if (process.env.SCRYPTED_ADMIN_USERNAME) {
         let user = await db.tryGet(ScryptedUser, process.env.SCRYPTED_ADMIN_USERNAME);
         if (!user) {
-            user = new ScryptedUser();
-            user._id = process.env.SCRYPTED_ADMIN_USERNAME;
-            setScryptedUserPassword(user, crypto.randomBytes(8).toString('hex'), Date.now());
-            user.token = crypto.randomBytes(16).toString('hex');
-            await db.upsert(user);
+            user = await scrypted.usersService.addUserInternal(process.env.SCRYPTED_ADMIN_USERNAME, crypto.randomBytes(8).toString('hex'), undefined);
             hasLogin = true;
         }
     }
@@ -524,11 +542,7 @@ async function start(mainFilename: string, options?: {
             return;
         }
 
-        const user = new ScryptedUser();
-        user._id = username;
-        setScryptedUserPassword(user, password, timestamp);
-        user.token = crypto.randomBytes(16).toString('hex');
-        await db.upsert(user);
+        const user = await scrypted.usersService.addUserInternal(username, password, undefined);
         hasLogin = true;
 
         const userToken = new UserToken(username, user.aclId, timestamp);
@@ -569,14 +583,15 @@ async function start(mainFilename: string, options?: {
         const addresses = ((await scrypted.addressSettings.getLocalAddresses()) || getHostAddresses(true, true)).map(address => `https://${address}:${SCRYPTED_SECURE_PORT}`);
 
         // env/header based admin login
-        if (res.locals.username && res.locals.username === process.env.SCRYPTED_ADMIN_USERNAME) {
-            const userToken = new UserToken(res.locals.username, undefined, Date.now());
+        if (res.locals.username) {
+            const user = scrypted.usersService.users.get(res.locals.username);
+            const userToken = new UserToken(res.locals.username, user.aclId, Date.now());
 
             res.send({
                 ...createTokens(userToken),
                 expiration: ONE_DAY_MILLISECONDS,
                 username: res.locals.username,
-                token: process.env.SCRYPTED_ADMIN_TOKEN,
+                token: user.token,
                 addresses,
                 hostname,
             });
@@ -621,10 +636,9 @@ async function start(mainFilename: string, options?: {
 
         // cookie auth
         try {
-            const login_user_token = getSignedLoginUserTokenRawValue(req);
-            if (!login_user_token)
+            const userToken = getSignedLoginUserToken(req);
+            if (!userToken)
                 throw new Error('Not logged in.');
-            const userToken = UserToken.validateToken(login_user_token);
 
             res.send({
                 ...createTokens(userToken),
@@ -644,7 +658,9 @@ async function start(mainFilename: string, options?: {
         }
     });
 
-    app.get('/', (_req, res) => res.redirect('/endpoint/@scrypted/core/public/'));
+    app.get('/', (_req, res) => res.redirect('./endpoint/@scrypted/core/public/'));
+
+    return scrypted;
 }
 
 export default start;

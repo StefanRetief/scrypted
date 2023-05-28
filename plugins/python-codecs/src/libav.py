@@ -1,9 +1,9 @@
 import time
-from gst_generator import createPipelineIterator
 import scrypted_sdk
 from typing import Any
 import vipsimage
 import pilimage
+from generator_common import createVideoFrame
 
 av = None
 try:
@@ -31,6 +31,10 @@ async def generateVideoFramesLibav(mediaObject: scrypted_sdk.MediaObject, option
 
     start = 0
     try:
+        vipsImage: vipsimage.VipsImage = None
+        pilImage: pilimage.PILImage = None
+        mo: scrypted_sdk.MediaObject = None
+
         for idx, frame in enumerate(container.decode(stream)):
             now = time.time()
             if not start:
@@ -47,10 +51,14 @@ async def generateVideoFramesLibav(mediaObject: scrypted_sdk.MediaObject, option
                     vips = vipsimage.pyvips.Image.new_from_array(frame.to_ndarray(format='gray'))
                 else:
                     vips = vipsimage.pyvips.Image.new_from_array(frame.to_ndarray(format='rgb24'))
-                vipsImage = vipsimage.VipsImage(vips)
-                try:
+
+                if not mo:
+                    vipsImage = vipsimage.VipsImage(vips)
                     mo = await vipsimage.createVipsMediaObject(vipsImage)
-                    yield mo
+
+                vipsImage.vipsImage = vips
+                try:
+                    yield createVideoFrame(mo)
                 finally:
                     vipsImage.vipsImage = None
                     vips.invalidate()
@@ -65,10 +73,14 @@ async def generateVideoFramesLibav(mediaObject: scrypted_sdk.MediaObject, option
                         rgb.close()
                 else:
                     pil = frame.to_image()
-                pilImage = pilimage.PILImage(pil)
-                try:
+
+                if not mo:
+                    pilImage = pilimage.PILImage(pil)
                     mo = await pilimage.createPILMediaObject(pilImage)
-                    yield mo
+
+                pilImage.pilImage = pil
+                try:
+                    yield createVideoFrame(mo)
                 finally:
                     pilImage.pilImage = None
                     pil.close()

@@ -9,7 +9,7 @@ except:
     # Image = None
     pass
 
-class PILImage(scrypted_sdk.VideoFrame):
+class PILImage(scrypted_sdk.Image):
     def __init__(self, pilImage: Image.Image) -> None:
         super().__init__()
         self.pilImage = pilImage
@@ -26,7 +26,7 @@ class PILImage(scrypted_sdk.VideoFrame):
         elif options['format'] == 'rgb':
             def format():
                 rgbx = pilImage.pilImage
-                if rgbx.format != 'RGBA':
+                if rgbx.mode != 'RGBA':
                     return rgbx.tobytes()
                 rgb = rgbx.convert('RGB')
                 try:
@@ -34,10 +34,21 @@ class PILImage(scrypted_sdk.VideoFrame):
                 finally:
                     rgb.close()
             return await to_thread(format)
+        elif options['format'] == 'gray':
+            def format():
+                if pilImage.pilImage.mode == 'L':
+                    return pilImage.pilImage.tobytes()
+                l = pilImage.pilImage.convert('L')
+                try:
+                    return l.tobytes()
+                finally:
+                    l.close()
+            return await to_thread(format)
 
         def save():
             bytesArray = io.BytesIO()
-            pilImage.pilImage.save(bytesArray, format=options['format'])
+            pilImage.pilImage.save(bytesArray, format='JPEG')
+            # pilImage.pilImage.save(bytesArray, format=options['format'])
             return bytesArray.getvalue()
 
         return await to_thread(lambda: save())
@@ -96,6 +107,7 @@ class ImageReader(scrypted_sdk.ScryptedDeviceBase, scrypted_sdk.BufferConverter)
 
     async def convert(self, data: Any, fromMimeType: str, toMimeType: str, options: scrypted_sdk.MediaObjectOptions = None) -> Any:
         pil = Image.open(io.BytesIO(data))
+        pil.load()
         return await createPILMediaObject(PILImage(pil))
 
 class ImageWriter(scrypted_sdk.ScryptedDeviceBase, scrypted_sdk.BufferConverter):

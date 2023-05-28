@@ -17,7 +17,13 @@ const { systemManager, deviceManager, endpointManager } = sdk;
 const indexHtml = fs.readFileSync('dist/index.html').toString();
 
 export function getAddresses() {
-    const addresses = Object.entries(os.networkInterfaces()).filter(([iface]) => iface.startsWith('en') || iface.startsWith('eth') || iface.startsWith('wlan')).map(([_, addr]) => addr).flat().map(info => info.address).filter(address => address);
+    const addresses: string[] = [];
+    for (const [iface, nif] of Object.entries(os.networkInterfaces())) {
+        if (iface.startsWith('en') || iface.startsWith('eth') || iface.startsWith('wlan')) {
+            addresses.push(iface);
+            addresses.push(...nif.map(addr => addr.address));
+        }
+    }
     return addresses;
 }
 
@@ -29,7 +35,6 @@ class ScryptedCore extends ScryptedDeviceBase implements HttpRequestHandler, Eng
     router: any = Router();
     publicRouter: any = Router();
     mediaCore: MediaCore;
-    launcher: LauncherMixin;
     scriptCore: ScriptCore;
     aggregateCore: AggregateCore;
     automationCore: AutomationCore;
@@ -37,17 +42,18 @@ class ScryptedCore extends ScryptedDeviceBase implements HttpRequestHandler, Eng
     localAddresses: string[];
     storageSettings = new StorageSettings(this, {
         localAddresses: {
-            title: 'Scrypted Server Address',
-            description: 'The IP address used by the Scrypted server. Set this to the wired IP address to prevent usage of a wireless address.',
+            title: 'Scrypted Server Addresses',
+            description: 'The IP addresses used by the Scrypted server. Set this to the wired IP address to prevent usage of a wireless address.',
             combobox: true,
+            multiple: true,
             async onGet() {
                 return {
                     choices: getAddresses(),
                 };
             },
-            mapGet: () => this.localAddresses?.[0],
+            mapGet: () => this.localAddresses,
             onPut: async (oldValue, newValue) => {
-                this.localAddresses = newValue ? [newValue] : undefined;
+                this.localAddresses = newValue?.length ? newValue : undefined;
                 const service = await sdk.systemManager.getComponent('addresses');
                 service.setLocalAddresses(this.localAddresses);
             },
@@ -66,7 +72,6 @@ class ScryptedCore extends ScryptedDeviceBase implements HttpRequestHandler, Eng
                     type: ScryptedDeviceType.Builtin,
                 },
             );
-            this.mediaCore = new MediaCore('mediacore');
         })();
         (async () => {
             await deviceManager.onDeviceDiscovered(
@@ -77,7 +82,6 @@ class ScryptedCore extends ScryptedDeviceBase implements HttpRequestHandler, Eng
                     type: ScryptedDeviceType.Builtin,
                 },
             );
-            this.scriptCore = new ScriptCore();
         })();
 
         (async () => {
@@ -89,8 +93,18 @@ class ScryptedCore extends ScryptedDeviceBase implements HttpRequestHandler, Eng
                     type: ScryptedDeviceType.Builtin,
                 },
             );
-            this.automationCore = new AutomationCore();
         })();
+
+        deviceManager.onDeviceDiscovered({
+            name: 'Add to Launcher',
+            nativeId: 'launcher',
+            interfaces: [
+                '@scrypted/launcher-ignore',
+                ScryptedInterface.MixinProvider,
+                ScryptedInterface.Readme,
+            ],
+            type: ScryptedDeviceType.Builtin,
+        });
 
         (async () => {
             await deviceManager.onDeviceDiscovered(
@@ -101,7 +115,6 @@ class ScryptedCore extends ScryptedDeviceBase implements HttpRequestHandler, Eng
                     type: ScryptedDeviceType.Builtin,
                 },
             );
-            this.aggregateCore = new AggregateCore();
         })();
 
 
@@ -114,19 +127,19 @@ class ScryptedCore extends ScryptedDeviceBase implements HttpRequestHandler, Eng
                     type: ScryptedDeviceType.Builtin,
                 },
             );
-            this.users = new UsersCore();
         })();
     }
 
     async getSettings(): Promise<Setting[]> {
         try {
             const service = await sdk.systemManager.getComponent('addresses');
-            this.localAddresses = await service.getLocalAddresses();
+            this.localAddresses = await service.getLocalAddresses(true);
         }
         catch (e) {
         }
         return this.storageSettings.getSettings();
     }
+
     async putSetting(key: string, value: SettingValue): Promise<void> {
         await this.storageSettings.putSetting(key, value);
     }
@@ -135,15 +148,15 @@ class ScryptedCore extends ScryptedDeviceBase implements HttpRequestHandler, Eng
         if (nativeId === 'launcher')
             return new LauncherMixin('launcher');
         if (nativeId === 'mediacore')
-            return this.mediaCore;
+            return this.mediaCore ||= new MediaCore();
         if (nativeId === ScriptCoreNativeId)
-            return this.scriptCore;
+            return this.scriptCore ||= new ScriptCore();
         if (nativeId === AutomationCoreNativeId)
-            return this.automationCore;
+            return this.automationCore ||= new AutomationCore()
         if (nativeId === AggregateCoreNativeId)
-            return this.aggregateCore;
+            return this.aggregateCore ||= new AggregateCore();
         if (nativeId === UsersNativeId)
-            return this.users;
+            return this.users ||= new UsersCore();
     }
 
     async releaseDevice(id: string, nativeId: string): Promise<void> {
@@ -200,9 +213,9 @@ class ScryptedCore extends ScryptedDeviceBase implements HttpRequestHandler, Eng
                 const u = new URL(endpoint);
 
                 const rewritten = indexHtml
-                    .replace('href="/endpoint/@scrypted/core/public/manifest.json"', `href="/endpoint/@scrypted/core/public/manifest.json${u.search}"`)
-                    .replace('href="/endpoint/@scrypted/core/public/img/icons/apple-touch-icon-152x152.png"', `href="/endpoint/@scrypted/core/public/img/icons/apple-touch-icon-152x152.png${u.search}"`)
-                    .replace('href="/endpoint/@scrypted/core/public/img/icons/safari-pinned-tab.svg"', `href="/endpoint/@scrypted/core/public/img/icons/safari-pinned-tab.svg${u.search}"`)
+                    .replace('href="manifest.json"', `href="manifest.json${u.search}"`)
+                    .replace('href="img/icons/apple-touch-icon-152x152.png"', `href="img/icons/apple-touch-icon-152x152.png${u.search}"`)
+                    .replace('href="img/icons/safari-pinned-tab.svg"', `href="img/icons/safari-pinned-tab.svg${u.search}"`)
                     ;
                 response.send(rewritten, {
                     headers: {

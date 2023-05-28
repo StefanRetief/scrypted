@@ -1,8 +1,13 @@
-from asyncio.futures import Future
-from typing import Any, Callable, Dict, Mapping, List
-import traceback
 import inspect
-from typing_extensions import TypedDict
+import traceback
+from asyncio.futures import Future
+from typing import Any, Callable, Dict, List, Mapping
+
+try:
+    from typing import TypedDict
+except:
+    from typing_extensions import TypedDict
+
 import weakref
 
 jsonSerializable = set()
@@ -129,6 +134,7 @@ class RpcPeer:
         self.nameDeserializerMap: Mapping[str, RpcSerializer] = {}
         self.onProxySerialization: Callable[[Any, str], Any] = None
         self.killed = False
+        self.tags = {}
 
     def __apply__(self, proxyId: str, oneWayMethods: List[str], method: str, args: list):
         oneway = oneWayMethods and method in oneWayMethods

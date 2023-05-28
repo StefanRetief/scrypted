@@ -129,6 +129,16 @@ export function getNaluTypes(streamChunk: StreamChunk) {
     return getNaluTypesInNalu(streamChunk.chunks[streamChunk.chunks.length - 1].subarray(12))
 }
 
+export function getNaluFragmentInformation(nalu: Buffer) {
+    const naluType = nalu[0] & 0x1f;
+    const fua = naluType === H264_NAL_TYPE_FU_A;
+    return {
+        fua,
+        fuaStart: fua && !!(nalu[1] & 0x80),
+        fuaEnd: fua && !!(nalu[1] & 0x40),
+    }
+}
+
 export function getNaluTypesInNalu(nalu: Buffer, fuaRequireStart = false, fuaRequireEnd = false) {
     const ret = new Set<number>();
     const naluType = nalu[0] & 0x1f;
@@ -671,7 +681,7 @@ export class RtspClient extends RtspBase {
         });
     }
 
-    async setup(options: RtspClientTcpSetupOptions | RtspClientUdpSetupOptions) {
+    async setup(options: RtspClientTcpSetupOptions | RtspClientUdpSetupOptions, headers?: Headers) {
         const protocol = options.type === 'udp' ? '' : '/TCP';
         const client = options.type === 'udp' ? 'client_port' : 'interleaved';
         let port: number;
@@ -687,9 +697,9 @@ export class RtspClient extends RtspBase {
             port = options.dgram.address().port;
             options.dgram.on('message', data => options.onRtp(undefined, data));
         }
-        const headers: any = {
+        headers = Object.assign({
             Transport: `RTP/AVP${protocol};unicast;${client}=${port}-${port + 1}`,
-        };
+        }, headers);
         const response = await this.request('SETUP', headers, options.path);
         let interleaved: {
             begin: number;

@@ -9,7 +9,7 @@ from PIL import Image
 import asyncio
 import concurrent.futures
 
-predictExecutor = concurrent.futures.ThreadPoolExecutor(2, "CoreML-Predict")
+predictExecutor = concurrent.futures.ThreadPoolExecutor(8, "CoreML-Predict")
 
 def parse_label_contents(contents: str):
     lines = contents.splitlines()
@@ -22,12 +22,9 @@ def parse_label_contents(contents: str):
             ret[row_number] = content.strip()
     return ret
 
-
-MIME_TYPE = 'x-scrypted-coreml/x-raw-image'
-
 class CoreMLPlugin(PredictPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Settings):
     def __init__(self, nativeId: str | None = None):
-        super().__init__(MIME_TYPE, nativeId=nativeId)
+        super().__init__(nativeId=nativeId)
 
         labelsFile = self.downloadFile('https://raw.githubusercontent.com/koush/coreml-survival-guide/master/MobileNetV2%2BSSDLite/coco_labels.txt', 'coco_labels.txt')
         modelFile = self.downloadFile('https://github.com/koush/coreml-survival-guide/raw/master/MobileNetV2%2BSSDLite/ObjectDetection/ObjectDetection/MobileNetV2_SSDLite.mlmodel', 'MobileNetV2_SSDLite.mlmodel')
@@ -42,6 +39,7 @@ class CoreMLPlugin(PredictPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
         labels_contents = open(labelsFile, 'r').read()
         self.labels = parse_label_contents(labels_contents)
         self.loop = asyncio.get_event_loop()
+        self.minThreshold = .2
 
     # width, height, channels
     def get_input_details(self) -> Tuple[int, int, int]:
@@ -53,19 +51,19 @@ class CoreMLPlugin(PredictPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
     async def detect_once(self, input: Image.Image, settings: Any, src_size, cvss):
         # run in executor if this is the plugin loop
         if asyncio.get_event_loop() is self.loop:
-            out_dict = await asyncio.get_event_loop().run_in_executor(predictExecutor, lambda: self.model.predict({'image': input, 'confidenceThreshold': .2 }))
+            out_dict = await asyncio.get_event_loop().run_in_executor(predictExecutor, lambda: self.model.predict({'image': input, 'confidenceThreshold': self.minThreshold }))
         else:
-            out_dict = self.model.predict({'image': input, 'confidenceThreshold': .2 })
+            out_dict = self.model.predict({'image': input, 'confidenceThreshold': self.minThreshold })
 
-        coordinatesList = out_dict['coordinates']
+        coordinatesList = out_dict['coordinates'].astype(float)
 
         objs = []
 
-        for index, confidenceList in enumerate(out_dict['confidence']):
+        for index, confidenceList in enumerate(out_dict['confidence'].astype(float)):
             values = confidenceList
             maxConfidenceIndex = max(range(len(values)), key=values.__getitem__)
             maxConfidence = confidenceList[maxConfidenceIndex]
-            if maxConfidence < .2:
+            if maxConfidence < self.minThreshold:
                 continue
 
             coordinates = coordinatesList[index]
@@ -90,6 +88,5 @@ class CoreMLPlugin(PredictPlugin, scrypted_sdk.BufferConverter, scrypted_sdk.Set
             ))
             objs.append(obj)
 
-        allowList = settings.get('allowList', None) if settings else None
-        ret = self.create_detection_result(objs, src_size, allowList, cvss)
+        ret = self.create_detection_result(objs, src_size, cvss)
         return ret
